@@ -168,11 +168,31 @@ class FreshExtension_AutoTranslate_PendingEntries_Model extends Minz_ModelPdo
     }
 
     /**
-     * Add a tag (#t:{tagId}) to the `tags` column of `_entry`.
-     * Used to keep the column in sync with `_entrytag`.
+     * Add a tag to an entry: to the `tags` column of `_entry` (used by the
+     * GReader API and fast filters) AND to the `_entrytag` table (the web UI
+     * builds label lists and counters from it). Idempotent.
      */
     public function addTagToEntry(int $tagId, string $entryId): bool
     {
+        // Web UI side: _entrytag
+        $stm = $this->pdo->prepare('SELECT COUNT(*) AS c FROM `_entrytag` WHERE id_tag = :id_tag AND id_entry = :id_entry');
+        if ($stm !== false) {
+            $stm->bindValue(':id_tag', $tagId, PDO::PARAM_INT);
+            $stm->bindValue(':id_entry', $entryId, PDO::PARAM_STR);
+            if ($stm->execute() && is_array($row = $stm->fetch(PDO::FETCH_ASSOC)) && (int)($row['c'] ?? 0) === 0) {
+                $ins = $this->pdo->prepare('INSERT INTO `_entrytag` (id_tag, id_entry) VALUES (:id_tag, :id_entry)');
+                if ($ins !== false) {
+                    $ins->bindValue(':id_tag', $tagId, PDO::PARAM_INT);
+                    $ins->bindValue(':id_entry', $entryId, PDO::PARAM_STR);
+                    if (!$ins->execute()) {
+                        $info = $ins->errorInfo();
+                        Minz_Log::warning('AutoTranslate: Failed to insert into _entrytag: ' . json_encode($info));
+                    }
+                }
+            }
+        }
+
+        // GReader API side: tags column of _entry
         $currentTags = $this->getEntryTags($entryId);
         if ($currentTags === null) {
             return false;

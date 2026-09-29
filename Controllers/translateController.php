@@ -142,6 +142,10 @@ class FreshExtension_AutoTranslate_Controller extends FreshRSS_ActionController
                 continue;
             }
 
+            // Make the pending entry visible in the web UI label section
+            // (the hook only writes the tags column, _entrytag needs a row too)
+            $model->addTagToEntry((int)$pendingTag->id(), $entryId);
+
             // Skip entries already labelled as advertisement by the ad filter
             if ($this->skipAds && $adsTag !== null && $model->hasTag((int)$adsTag->id(), $entryId)) {
                 $model->removeTagFromEntry((int)$pendingTag->id(), $entryId);
