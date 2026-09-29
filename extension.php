@@ -29,6 +29,7 @@ class AutoTranslateExtension extends Minz_Extension
     public function handleConfigureAction(): void
     {
         if (Minz_Request::isPost()) {
+            $oldConfig = $this->getSystemConfiguration();
             $channelsFilter = $_POST['auto_translate_channels_filter'] ?? [];
             if (!is_array($channelsFilter)) {
                 $channelsFilter = [];
@@ -64,6 +65,59 @@ class AutoTranslateExtension extends Minz_Extension
             ];
 
             $this->setSystemConfiguration($newConfig);
+
+            // Newly added feeds: queue their already-received articles too
+            $oldChannels = $oldConfig['channels_filter'] ?? [];
+            if (!is_array($oldChannels)) {
+                $oldChannels = [];
+            }
+            $addedFeeds = array_values(array_diff($newConfig['channels_filter'], $oldChannels));
+            if (!empty($addedFeeds)) {
+                $this->queueExistingEntriesForFeeds($addedFeeds);
+            }
+        }
+    }
+
+    /**
+     * Put the pending label on already-received articles of newly added feeds,
+     * so the background worker translates them as well.
+     *
+     * @param array<int, string> $feedIds
+     */
+    private function queueExistingEntriesForFeeds(array $feedIds): void
+    {
+        $labelPending = (string)$this->getSystemConfigurationValue('label_pending') ?: FreshExtension_AutoTranslate_Labels::DEFAULT_PENDING;
+        $labelTranslated = (string)$this->getSystemConfigurationValue('label_translated') ?: FreshExtension_AutoTranslate_Labels::DEFAULT_TRANSLATED;
+
+        $tagDao = FreshRSS_Factory::createTagDao();
+        try {
+            $pendingTag = $tagDao->searchByName($labelPending);
+            if ($pendingTag === null) {
+                if ($tagDao->addTag(['name' => $labelPending]) === false) {
+                    return;
+                }
+                $pendingTag = $tagDao->searchByName($labelPending);
+            }
+            if ($pendingTag === null) {
+                return;
+            }
+            $translatedTag = $tagDao->searchByName($labelTranslated);
+
+            $model = new FreshExtension_AutoTranslate_PendingEntries_Model();
+            $marked = $model->queueExistingEntries(
+                (int)$pendingTag->id(),
+                $translatedTag !== null ? (int)$translatedTag->id() : null,
+                $feedIds
+            );
+            if ($marked > 0) {
+                Minz_Log::warning(sprintf(
+                    'AutoTranslate: Queued %d existing articles from %d newly added feed(s) for translation',
+                    $marked,
+                    count($feedIds)
+                ));
+            }
+        } catch (Exception $e) {
+            Minz_Log::warning('AutoTranslate: Failed to queue existing articles: ' . $e->getMessage());
         }
     }
 

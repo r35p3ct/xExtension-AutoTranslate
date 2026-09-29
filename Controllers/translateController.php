@@ -280,9 +280,9 @@ class FreshExtension_AutoTranslate_Controller extends FreshRSS_ActionController
     }
 
     /**
-     * Translate HTML content preserving markup: Google returns plain text for
-     * `dt=t`, so the content is split into chunks at </p> boundaries — every
-     * chunk keeps whole paragraphs and survives the round-trip.
+     * Translate HTML content preserving markup. Every chunk's tags are masked
+     * with {{n}} tokens before the request (Google would otherwise mangle or
+     * translate tag names like <hr> → <час>) and restored afterwards.
      *
      * @return array{0: string, 1: string} [translated html, detected source lang]
      */
@@ -297,8 +297,9 @@ class FreshExtension_AutoTranslate_Controller extends FreshRSS_ActionController
         $src = '';
 
         foreach ($chunks as $i => $chunk) {
-            [$translated, $chunkSrc] = $this->googleTranslateChunk($chunk);
-            $out .= $translated;
+            [$masked, $tags] = $this->maskHtmlTags($chunk);
+            [$translated, $chunkSrc] = $this->googleTranslateChunk($masked);
+            $out .= $this->unmaskHtmlTags($translated, $tags);
             if ($src === '' && $chunkSrc !== '') {
                 $src = $chunkSrc;
             }
@@ -308,6 +309,36 @@ class FreshExtension_AutoTranslate_Controller extends FreshRSS_ActionController
         }
 
         return [$out, $src];
+    }
+
+    /**
+     * Replace HTML tags with {{n}} placeholder tokens that survive MT.
+     *
+     * @return array{0: string, 1: list<string>} [masked text, original tags by index]
+     */
+    private function maskHtmlTags(string $html): array
+    {
+        $tags = [];
+        $masked = preg_replace_callback('/<[^<>]*>/u', static function (array $m) use (&$tags): string {
+            $tags[] = $m[0];
+            return '{{' . count($tags) . '}}';
+        }, $html);
+        return [$masked ?? $html, $tags];
+    }
+
+    /**
+     * Restore the tags from {{n}} tokens. Tokens dropped by the engine
+     * disappear — the text stays readable, just loses that tag.
+     */
+    private function unmaskHtmlTags(string $text, array $tags): string
+    {
+        if (empty($tags)) {
+            return $text;
+        }
+        return preg_replace_callback('/\{\{(\d+)\}\}/', static function (array $m) use ($tags): string {
+            $i = (int)$m[1];
+            return ($i >= 1 && $i <= count($tags)) ? $tags[$i - 1] : '';
+        }, $text) ?? $text;
     }
 
     /**

@@ -168,29 +168,66 @@ class FreshExtension_AutoTranslate_PendingEntries_Model extends Minz_ModelPdo
     }
 
     /**
+     * Queue already-received articles of the given feeds (used when new feeds
+     * are added to the translation list, so they are translated too and not
+     * only the new arrivals). Entries already carrying the pending or the
+     * translated tag are skipped.
+     *
+     * @param int $pendingTagId id of the pending tag
+     * @param int|null $translatedTagId id of the translated tag (null = unknown)
+     * @param array<int, string|int> $feedIds feed ids
+     * @return int number of newly queued entries
+     */
+    public function queueExistingEntries(int $pendingTagId, ?int $translatedTagId, array $feedIds): int
+    {
+        if (empty($feedIds)) {
+            return 0;
+        }
+
+        $placeholders = implode(',', array_fill(0, count($feedIds), '?'));
+        $sql = "SELECT id, tags FROM `_entry` WHERE id_feed IN ($placeholders) ORDER BY date DESC";
+        $params = array_map(static fn($f): int => (int)$f, $feedIds);
+
+        $stm = $this->pdo->prepare($sql);
+        if ($stm === false || !$stm->execute($params)) {
+            return 0;
+        }
+
+        $pendingPattern = '#t:' . $pendingTagId;
+        $translatedPattern = $translatedTagId !== null ? '#t:' . $translatedTagId : null;
+        $marked = 0;
+
+        while (is_array($row = $stm->fetch(PDO::FETCH_ASSOC))) {
+            $entryId = (string)($row['id'] ?? '');
+            if ($entryId === '') {
+                continue;
+            }
+            $parts = ($row['tags'] ?? '') === '' ? [] : explode(' ', (string)$row['tags']);
+            if (in_array($pendingPattern, $parts, true)) {
+                continue;
+            }
+            if ($translatedPattern !== null && in_array($translatedPattern, $parts, true)) {
+                continue;
+            }
+            $parts[] = $pendingPattern;
+            if (!$this->setEntryTags($entryId, implode(' ', $parts))) {
+                continue;
+            }
+            $this->ensureEntrytagRow($pendingTagId, $entryId);
+            $marked++;
+        }
+
+        return $marked;
+    }
+
+    /**
      * Add a tag to an entry: to the `tags` column of `_entry` (used by the
      * GReader API and fast filters) AND to the `_entrytag` table (the web UI
      * builds label lists and counters from it). Idempotent.
      */
     public function addTagToEntry(int $tagId, string $entryId): bool
     {
-        // Web UI side: _entrytag
-        $stm = $this->pdo->prepare('SELECT COUNT(*) AS c FROM `_entrytag` WHERE id_tag = :id_tag AND id_entry = :id_entry');
-        if ($stm !== false) {
-            $stm->bindValue(':id_tag', $tagId, PDO::PARAM_INT);
-            $stm->bindValue(':id_entry', $entryId, PDO::PARAM_STR);
-            if ($stm->execute() && is_array($row = $stm->fetch(PDO::FETCH_ASSOC)) && (int)($row['c'] ?? 0) === 0) {
-                $ins = $this->pdo->prepare('INSERT INTO `_entrytag` (id_tag, id_entry) VALUES (:id_tag, :id_entry)');
-                if ($ins !== false) {
-                    $ins->bindValue(':id_tag', $tagId, PDO::PARAM_INT);
-                    $ins->bindValue(':id_entry', $entryId, PDO::PARAM_STR);
-                    if (!$ins->execute()) {
-                        $info = $ins->errorInfo();
-                        Minz_Log::warning('AutoTranslate: Failed to insert into _entrytag: ' . json_encode($info));
-                    }
-                }
-            }
-        }
+        $this->ensureEntrytagRow($tagId, $entryId);
 
         // GReader API side: tags column of _entry
         $currentTags = $this->getEntryTags($entryId);
@@ -210,6 +247,34 @@ class FreshExtension_AutoTranslate_PendingEntries_Model extends Minz_ModelPdo
         $parts[] = $tagPattern;
 
         return $this->setEntryTags($entryId, implode(' ', $parts));
+    }
+
+    /**
+     * Make sure the `_entrytag` table has the (tag, entry) row — the web UI
+     * builds label lists and counters from this table.
+     */
+    private function ensureEntrytagRow(int $tagId, string $entryId): void
+    {
+        $stm = $this->pdo->prepare('SELECT COUNT(*) AS c FROM `_entrytag` WHERE id_tag = :id_tag AND id_entry = :id_entry');
+        if ($stm === false) {
+            return;
+        }
+        $stm->bindValue(':id_tag', $tagId, PDO::PARAM_INT);
+        $stm->bindValue(':id_entry', $entryId, PDO::PARAM_STR);
+        if (!$stm->execute() || !is_array($row = $stm->fetch(PDO::FETCH_ASSOC)) || (int)($row['c'] ?? 0) > 0) {
+            return;
+        }
+
+        $ins = $this->pdo->prepare('INSERT INTO `_entrytag` (id_tag, id_entry) VALUES (:id_tag, :id_entry)');
+        if ($ins === false) {
+            return;
+        }
+        $ins->bindValue(':id_tag', $tagId, PDO::PARAM_INT);
+        $ins->bindValue(':id_entry', $entryId, PDO::PARAM_STR);
+        if (!$ins->execute()) {
+            $info = $ins->errorInfo();
+            Minz_Log::warning('AutoTranslate: Failed to insert into _entrytag: ' . json_encode($info));
+        }
     }
 
     private function setEntryTags(string $entryId, string $tags): bool
