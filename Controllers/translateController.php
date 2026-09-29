@@ -21,6 +21,7 @@ require_once __DIR__ . '/../Models/PendingEntriesModel.php';
 class FreshExtension_AutoTranslate_Controller extends FreshRSS_ActionController
 {
     private const GOOGLE_ENDPOINT   = 'https://translate.googleapis.com/translate_a/single';
+    private const GOOGLE_ALT_ENDPOINT = 'https://clients5.google.com/translate_a/t';
     private const GOOGLE_CHUNK_SIZE = 4000;
     private const MAX_LOG_TITLE     = 150;
 
@@ -382,17 +383,47 @@ class FreshExtension_AutoTranslate_Controller extends FreshRSS_ActionController
     }
 
     /**
+     * One translation attempt: the public endpoint first, and if it is
+     * rate-limited for this IP (HTTP 429 happens on VPS ranges) — the
+     * dict-chrome-ex fallback host, which also preserves HTML tags.
+     *
      * @return array{success: bool, translated?: string, src?: string, error?: string, http_code?: int}
      */
     private function googleTranslateOnce(string $text): array
     {
-        $url = self::GOOGLE_ENDPOINT . '?' . http_build_query(
-            ['client' => 'gtx', 'sl' => 'auto', 'tl' => $this->targetLang, 'dt' => 't', 'q' => $text],
-            '',
-            '&',
-            PHP_QUERY_RFC3986
+        $result = $this->googleGet(
+            self::GOOGLE_ENDPOINT . '?' . http_build_query(
+                ['client' => 'gtx', 'sl' => 'auto', 'tl' => $this->targetLang, 'dt' => 't', 'q' => $text],
+                '',
+                '&',
+                PHP_QUERY_RFC3986
+            ),
+            [$this, 'parseGoogleSingle']
         );
 
+        if ($result['success']) {
+            return $result;
+        }
+
+        return $this->googleGet(
+            self::GOOGLE_ALT_ENDPOINT . '?' . http_build_query(
+                ['client' => 'dict-chrome-ex', 'sl' => 'auto', 'tl' => $this->targetLang, 'q' => $text],
+                '',
+                '&',
+                PHP_QUERY_RFC3986
+            ),
+            [$this, 'parseGoogleDict']
+        );
+    }
+
+    /**
+     * GET request to a Google endpoint + response parsing.
+     *
+     * @param callable $parser fn(string $body): ?array{translated: string, src: string}
+     * @return array{success: bool, translated?: string, src?: string, error?: string, http_code?: int}
+     */
+    private function googleGet(string $url, callable $parser): array
+    {
         $ch = curl_init($url);
         curl_setopt_array($ch, [
             CURLOPT_RETURNTRANSFER => true,
@@ -419,12 +450,25 @@ class FreshExtension_AutoTranslate_Controller extends FreshRSS_ActionController
             return ['success' => false, 'error' => 'Google Translate HTTP ' . $httpCode, 'http_code' => $httpCode];
         }
 
-        $json = json_decode((string)$response, true);
-        if (!is_array($json) || !isset($json[0]) || !is_array($json[0])) {
+        $parsed = $parser((string)$response);
+        if ($parsed === null || $parsed['translated'] === '') {
             if ($this->enableLogging) {
                 Minz_Log::warning('AutoTranslate: Unexpected Google response: ' . substr((string)$response, 0, 200));
             }
             return ['success' => false, 'error' => 'Unexpected Google Translate response'];
+        }
+
+        return ['success' => true, 'translated' => $parsed['translated'], 'src' => $parsed['src']];
+    }
+
+    /**
+     * Parser for translate_a/single?client=gtx&dt=t: nested segment arrays.
+     */
+    public function parseGoogleSingle(string $response): ?array
+    {
+        $json = json_decode($response, true);
+        if (!is_array($json) || !isset($json[0]) || !is_array($json[0])) {
+            return null;
         }
 
         $translated = '';
@@ -435,8 +479,21 @@ class FreshExtension_AutoTranslate_Controller extends FreshRSS_ActionController
         }
 
         $src = is_string($json[2] ?? null) ? strtolower($json[2]) : '';
+        return ['translated' => $translated, 'src' => $src];
+    }
 
-        return ['success' => true, 'translated' => $translated, 'src' => $src];
+    /**
+     * Parser for translate_a/t?client=dict-chrome-ex: [["translated","src"]],
+     * HTML markup is preserved by this endpoint.
+     */
+    public function parseGoogleDict(string $response): ?array
+    {
+        $json = json_decode($response, true);
+        if (is_array($json) && isset($json[0][0]) && is_string($json[0][0])) {
+            $src = isset($json[0][1]) && is_string($json[0][1]) ? strtolower($json[0][1]) : '';
+            return ['translated' => $json[0][0], 'src' => $src];
+        }
+        return null;
     }
 
     // -------------------------------------------------------------------------

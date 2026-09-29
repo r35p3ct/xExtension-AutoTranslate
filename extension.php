@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/Labels.php';
+require_once __DIR__ . '/Controllers/translateController.php';
 
 /**
  * AutoTranslate extension for FreshRSS.
