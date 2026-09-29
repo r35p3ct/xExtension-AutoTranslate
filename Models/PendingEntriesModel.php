@@ -171,53 +171,203 @@ class FreshExtension_AutoTranslate_PendingEntries_Model extends Minz_ModelPdo
      * Queue already-received articles of the given feeds (used when new feeds
      * are added to the translation list, so they are translated too and not
      * only the new arrivals). Entries already carrying the pending or the
-     * translated tag are skipped.
+     * translated tag are skipped, as well as entries that are already in the
+     * target language.
      *
      * @param int $pendingTagId id of the pending tag
      * @param int|null $translatedTagId id of the translated tag (null = unknown)
      * @param array<int, string|int> $feedIds feed ids
+     * @param string $targetLang target language code
      * @return int number of newly queued entries
      */
-    public function queueExistingEntries(int $pendingTagId, ?int $translatedTagId, array $feedIds): int
+    public function queueExistingEntries(int $pendingTagId, ?int $translatedTagId, array $feedIds, string $targetLang = 'en'): int
     {
         if (empty($feedIds)) {
-            return 0;
-        }
-
-        $placeholders = implode(',', array_fill(0, count($feedIds), '?'));
-        $sql = "SELECT id, tags FROM `_entry` WHERE id_feed IN ($placeholders) ORDER BY date DESC";
-        $params = array_map(static fn($f): int => (int)$f, $feedIds);
-
-        $stm = $this->pdo->prepare($sql);
-        if ($stm === false || !$stm->execute($params)) {
             return 0;
         }
 
         $pendingPattern = '#t:' . $pendingTagId;
         $translatedPattern = $translatedTagId !== null ? '#t:' . $translatedTagId : null;
         $marked = 0;
+        $lastId = PHP_INT_MAX;
 
-        while (is_array($row = $stm->fetch(PDO::FETCH_ASSOC))) {
-            $entryId = (string)($row['id'] ?? '');
-            if ($entryId === '') {
-                continue;
+        while (true) {
+            $placeholders = implode(',', array_fill(0, count($feedIds), '?'));
+            $sql = "SELECT id, title, content, tags FROM `_entry`
+                    WHERE id_feed IN ($placeholders) AND id < ?
+                    ORDER BY id DESC LIMIT 300";
+            $params = array_map(static fn($f): int => (int)$f, $feedIds);
+            $params[] = $lastId;
+
+            $stm = $this->pdo->prepare($sql);
+            if ($stm === false || !$stm->execute($params)) {
+                break;
             }
-            $parts = ($row['tags'] ?? '') === '' ? [] : explode(' ', (string)$row['tags']);
-            if (in_array($pendingPattern, $parts, true)) {
-                continue;
+
+            $rows = $stm->fetchAll(PDO::FETCH_ASSOC);
+            if (empty($rows)) {
+                break;
             }
-            if ($translatedPattern !== null && in_array($translatedPattern, $parts, true)) {
-                continue;
+
+            foreach ($rows as $row) {
+                $lastId = (int)$row['id'];
+                $entryId = (string)($row['id'] ?? '');
+                if ($entryId === '') {
+                    continue;
+                }
+                $parts = ($row['tags'] ?? '') === '' ? [] : explode(' ', (string)$row['tags']);
+                if (in_array($pendingPattern, $parts, true)) {
+                    continue;
+                }
+                if ($translatedPattern !== null && in_array($translatedPattern, $parts, true)) {
+                    continue;
+                }
+                if (FreshExtension_AutoTranslate_Controller::isLikelyInTargetText(
+                    (string)($row['title'] ?? ''),
+                    (string)($row['content'] ?? ''),
+                    $targetLang
+                )) {
+                    continue;
+                }
+                $parts[] = $pendingPattern;
+                if (!$this->setEntryTags($entryId, implode(' ', $parts))) {
+                    continue;
+                }
+                $this->ensureEntrytagRow($pendingTagId, $entryId);
+                $marked++;
             }
-            $parts[] = $pendingPattern;
-            if (!$this->setEntryTags($entryId, implode(' ', $parts))) {
-                continue;
+
+            if (count($rows) < 300) {
+                break;
             }
-            $this->ensureEntrytagRow($pendingTagId, $entryId);
-            $marked++;
         }
 
         return $marked;
+    }
+
+    /**
+     * Remove the pending tag from all queued entries of the given feeds
+     * (used when feeds are removed from the translation list).
+     *
+     * @param int $pendingTagId id of the pending tag
+     * @param array<int, string|int> $feedIds feed ids
+     * @return int number of dequeued entries
+     */
+    public function dequeueFeeds(int $pendingTagId, array $feedIds): int
+    {
+        if (empty($feedIds)) {
+            return 0;
+        }
+
+        $pendingPattern = '#t:' . $pendingTagId;
+        $removed = 0;
+        $lastId = PHP_INT_MAX;
+
+        while (true) {
+            $placeholders = implode(',', array_fill(0, count($feedIds), '?'));
+            $sql = "SELECT id FROM `_entry`
+                    WHERE id_feed IN ($placeholders) AND id < ? AND (tags = ? OR tags LIKE ? OR tags LIKE ? OR tags LIKE ?)
+                    ORDER BY id DESC LIMIT 300";
+            $params = array_map(static fn($f): int => (int)$f, $feedIds);
+            $params[] = $lastId;
+            $params[] = $pendingPattern;
+            $params[] = $pendingPattern . ' %';
+            $params[] = '% ' . $pendingPattern . ' %';
+            $params[] = '% ' . $pendingPattern;
+
+            $stm = $this->pdo->prepare($sql);
+            if ($stm === false || !$stm->execute($params)) {
+                break;
+            }
+
+            $rows = $stm->fetchAll(PDO::FETCH_ASSOC);
+            if (empty($rows)) {
+                break;
+            }
+
+            foreach ($rows as $row) {
+                $lastId = (int)$row['id'];
+                $entryId = (string)($row['id'] ?? '');
+                if ($entryId === '') {
+                    continue;
+                }
+                if ($this->removeTagFromEntry($pendingTagId, $entryId)) {
+                    $removed++;
+                }
+            }
+
+            if (count($rows) < 300) {
+                break;
+            }
+        }
+
+        return $removed;
+    }
+
+    /**
+     * Remove the pending tag from queued entries that are already in the
+     * target language (no translation needed).
+     *
+     * @param int $pendingTagId id of the pending tag
+     * @param string $targetLang target language code
+     * @param array<int, string|int> $feedIds feed ids
+     * @return int number of dequeued entries
+     */
+    public function dequeueEntriesInTargetLanguage(int $pendingTagId, string $targetLang, array $feedIds): int
+    {
+        if (empty($feedIds)) {
+            return 0;
+        }
+
+        $pendingPattern = '#t:' . $pendingTagId;
+        $removed = 0;
+        $lastId = PHP_INT_MAX;
+
+        while (true) {
+            $placeholders = implode(',', array_fill(0, count($feedIds), '?'));
+            $sql = "SELECT id, title, content FROM `_entry`
+                    WHERE id_feed IN ($placeholders) AND id < ? AND (tags = ? OR tags LIKE ? OR tags LIKE ? OR tags LIKE ?)
+                    ORDER BY id DESC LIMIT 300";
+            $params = array_map(static fn($f): int => (int)$f, $feedIds);
+            $params[] = $lastId;
+            $params[] = $pendingPattern;
+            $params[] = $pendingPattern . ' %';
+            $params[] = '% ' . $pendingPattern . ' %';
+            $params[] = '% ' . $pendingPattern;
+
+            $stm = $this->pdo->prepare($sql);
+            if ($stm === false || !$stm->execute($params)) {
+                break;
+            }
+
+            $rows = $stm->fetchAll(PDO::FETCH_ASSOC);
+            if (empty($rows)) {
+                break;
+            }
+
+            foreach ($rows as $row) {
+                $lastId = (int)$row['id'];
+                $entryId = (string)($row['id'] ?? '');
+                if ($entryId === '') {
+                    continue;
+                }
+                if (FreshExtension_AutoTranslate_Controller::isLikelyInTargetText(
+                    (string)($row['title'] ?? ''),
+                    (string)($row['content'] ?? ''),
+                    $targetLang
+                )) {
+                    if ($this->removeTagFromEntry($pendingTagId, $entryId)) {
+                        $removed++;
+                    }
+                }
+            }
+
+            if (count($rows) < 300) {
+                break;
+            }
+        }
+
+        return $removed;
     }
 
     /**

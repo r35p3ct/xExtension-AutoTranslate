@@ -15,7 +15,8 @@ declare(strict_types=1);
             <?php $engine = $this->getSystemConfigurationValue('engine') ?: 'google'; ?>
             <select id="auto_translate_engine" name="auto_translate_engine">
                 <option value="google" <?php echo $engine === 'google' ? 'selected' : ''; ?>>Google Translate (free, no API key)</option>
-                <option value="llm" <?php echo $engine === 'llm' ? 'selected' : ''; ?>>LLM via OpenRouter</option>
+                <option value="both" <?php echo $engine === 'both' ? 'selected' : ''; ?>>Google + LLM fallback (recommended)</option>
+                <option value="llm" <?php echo $engine === 'llm' ? 'selected' : ''; ?>>LLM via OpenRouter only</option>
             </select>
             <p class="help"><?php echo _t('ext.field.engine_hint'); ?></p>
         </div>
@@ -150,7 +151,7 @@ declare(strict_types=1);
         <label class="group-name" for="auto_translate_request_delay_ms"><?php echo _t('ext.field.request_delay_ms'); ?></label>
         <div class="group-controls">
             <input type="number" id="auto_translate_request_delay_ms" name="auto_translate_request_delay_ms"
-                   value="<?php echo htmlspecialchars((string)($this->getSystemConfigurationValue('request_delay_ms') ?? 250), ENT_QUOTES); ?>"
+                   value="<?php echo htmlspecialchars((string)($this->getSystemConfigurationValue('request_delay_ms') ?? 1000), ENT_QUOTES); ?>"
                    min="0" max="60000" step="50" />
             <p class="help"><?php echo _t('ext.field.request_delay_ms_hint'); ?></p>
         </div>

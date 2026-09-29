@@ -61,14 +61,15 @@ class FreshExtension_AutoTranslate_Controller extends FreshRSS_ActionController
      */
     public function __construct(array $config = [])
     {
-        $this->engine            = ($config['engine'] ?? 'google') === 'llm' ? 'llm' : 'google';
+        $engine = (string)($config['engine'] ?? 'google');
+        $this->engine            = in_array($engine, ['llm', 'both'], true) ? $engine : 'google';
         $this->targetLang        = strtolower(trim((string)($config['target_lang'] ?? 'en'))) ?: 'en';
         $this->labelPending      = trim((string)($config['label_pending'] ?? '')) ?: FreshExtension_AutoTranslate_Labels::DEFAULT_PENDING;
         $this->labelTranslated   = trim((string)($config['label_translated'] ?? '')) ?: FreshExtension_AutoTranslate_Labels::DEFAULT_TRANSLATED;
         $this->labelAdvertisement = trim((string)($config['label_advertisement'] ?? '')) ?: FreshExtension_AutoTranslate_Labels::DEFAULT_ADVERTISEMENT;
         $this->skipAds           = !empty($config['skip_ads']);
         $this->waitAdsMinutes    = max(0, (int)($config['wait_ads_minutes'] ?? 10));
-        $this->requestDelayMs    = max(0, (int)($config['request_delay_ms'] ?? 250));
+        $this->requestDelayMs    = max(0, (int)($config['request_delay_ms'] ?? 1000));
         $this->enableLogging     = !empty($config['enable_logging']);
         $this->llmApiKey         = (string)($config['llm_api_key'] ?? '');
         $this->llmModel          = trim((string)($config['llm_model'] ?? '')) ?: 'openai/gpt-4o-mini';
@@ -170,11 +171,7 @@ class FreshExtension_AutoTranslate_Controller extends FreshRSS_ActionController
             $content = (string)$entry->content();
 
             try {
-                if ($this->engine === 'llm') {
-                    $translation = $this->translateWithLlm($title, $content);
-                } else {
-                    $translation = $this->translateWithGoogle($title, $content);
-                }
+                $translation = $this->translateEntry($title, $content);
             } catch (Throwable $e) {
                 $result['errors']++;
                 $result['details'][] = ['entry_id' => $entryId, 'error' => $e->getMessage()];
@@ -262,6 +259,31 @@ class FreshExtension_AutoTranslate_Controller extends FreshRSS_ActionController
     // -------------------------------------------------------------------------
     // Google engine
     // -------------------------------------------------------------------------
+
+    /**
+     * Translate one entry with the configured engine. In "both" mode a Google
+     * failure automatically falls back to the LLM engine.
+     *
+     * @return array{title: string, content: string}|null null = already in the target language
+     */
+    private function translateEntry(string $title, string $content): ?array
+    {
+        if ($this->engine === 'llm') {
+            return $this->translateWithLlm($title, $content);
+        }
+
+        try {
+            return $this->translateWithGoogle($title, $content);
+        } catch (Throwable $googleError) {
+            if ($this->engine !== 'both' || $this->llmApiKey === '') {
+                throw $googleError;
+            }
+            if ($this->enableLogging) {
+                Minz_Log::warning('AutoTranslate: Google failed (' . $googleError->getMessage() . '), falling back to LLM');
+            }
+            return $this->translateWithLlm($title, $content);
+        }
+    }
 
     /**
      * @return array{title: string, content: string}|null null = already in the target language
@@ -418,37 +440,61 @@ class FreshExtension_AutoTranslate_Controller extends FreshRSS_ActionController
     }
 
     /**
-     * One translation attempt: the public endpoint first, and if it is
-     * rate-limited for this IP (HTTP 429 happens on VPS ranges) — the
-     * dict-chrome-ex fallback host, which also preserves HTML tags.
+     * Endpoint currently known to work: 0 = primary, 1 = dict-chrome-ex
+     * fallback. Many VPS IP ranges are permanently rate-limited on the
+     * primary endpoint, so remember what worked last and try it first
+     * instead of wasting a request on the dead one every time.
+     */
+    private static int $googlePreferredEndpoint = 0;
+
+    /**
+     * One translation attempt: start with the endpoint that worked last,
+     * fall back to the other one. The dict-chrome-ex host also preserves
+     * HTML tags via the token masking in googleTranslateHtml().
      *
      * @return array{success: bool, translated?: string, src?: string, error?: string, http_code?: int}
      */
     private function googleTranslateOnce(string $text): array
     {
-        $result = $this->googleGet(
-            self::GOOGLE_ENDPOINT . '?' . http_build_query(
-                ['client' => 'gtx', 'sl' => 'auto', 'tl' => $this->targetLang, 'dt' => 't', 'q' => $text],
-                '',
-                '&',
-                PHP_QUERY_RFC3986
-            ),
-            [$this, 'parseGoogleSingle']
-        );
+        $order = self::$googlePreferredEndpoint === 1 ? [1, 0] : [0, 1];
+        $result = ['success' => false, 'error' => 'no endpoint tried'];
 
-        if ($result['success']) {
-            return $result;
+        foreach ($order as $endpoint) {
+            if ($endpoint === 0) {
+                $result = $this->googleGet(
+                    self::GOOGLE_ENDPOINT . '?' . http_build_query(
+                        ['client' => 'gtx', 'sl' => 'auto', 'tl' => $this->targetLang, 'dt' => 't', 'q' => $text],
+                        '',
+                        '&',
+                        PHP_QUERY_RFC3986
+                    ),
+                    [$this, 'parseGoogleSingle']
+                );
+            } else {
+                $result = $this->googleGet(
+                    self::GOOGLE_ALT_ENDPOINT . '?' . http_build_query(
+                        ['client' => 'dict-chrome-ex', 'sl' => 'auto', 'tl' => $this->targetLang, 'q' => $text],
+                        '',
+                        '&',
+                        PHP_QUERY_RFC3986
+                    ),
+                    [$this, 'parseGoogleDict']
+                );
+            }
+
+            if ($result['success']) {
+                self::$googlePreferredEndpoint = $endpoint;
+                return $result;
+            }
+
+            if (($result['http_code'] ?? 0) === 429) {
+                // This endpoint is throttled — flip the preference for the
+                // next request right away
+                self::$googlePreferredEndpoint = $endpoint === 0 ? 1 : 0;
+            }
         }
 
-        return $this->googleGet(
-            self::GOOGLE_ALT_ENDPOINT . '?' . http_build_query(
-                ['client' => 'dict-chrome-ex', 'sl' => 'auto', 'tl' => $this->targetLang, 'q' => $text],
-                '',
-                '&',
-                PHP_QUERY_RFC3986
-            ),
-            [$this, 'parseGoogleDict']
-        );
+        return $result;
     }
 
     /**
@@ -679,6 +725,29 @@ class FreshExtension_AutoTranslate_Controller extends FreshRSS_ActionController
         }
 
         return is_array($json) ? $json : null;
+    }
+
+    /**
+     * Cheap same-language check without any API call: for Cyrillic-script
+     * target languages an article whose letters are mostly Cyrillic counts
+     * as already translated. Shared by the hook, the queue backfill and the
+     * queue cleanup.
+     */
+    public static function isLikelyInTargetText(string $title, string $content, string $targetLang): bool
+    {
+        $target = strtolower(trim($targetLang)) ?: 'en';
+        if (!in_array($target, FreshExtension_AutoTranslate_Labels::CYRILLIC_TARGETS, true)) {
+            return false;
+        }
+
+        $text = $title . "\n" . strip_tags($content);
+        $letters = preg_match_all('/\p{L}/u', $text);
+        if ($letters < 40) {
+            return false;
+        }
+
+        $cyrillic = preg_match_all('/\p{Cyrillic}/u', $text);
+        return ($cyrillic / $letters) > 0.7;
     }
 
     private static function formatTitleForLog(string $title): string

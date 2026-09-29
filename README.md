@@ -56,7 +56,7 @@ The engine is a dropdown in the settings; you can switch at any time.
 | LLM API key / model | — / `openai/gpt-4o-mini` | only for the LLM engine |
 | Max content length | 6000 chars | truncation before the LLM |
 | Batch size | 10 | entries per cron run |
-| Request delay | 250 ms | pause between translation requests |
+| Request delay | 1000 ms | pause between translation requests |
 | Logging | off | detailed logs for debugging |
 
 ### Notes
@@ -121,7 +121,7 @@ The engine is a dropdown in the settings; you can switch at any time.
 | LLM API ключ / модель | — / `openai/gpt-4o-mini` | только для движка LLM |
 | Максимальная длина текста | 6000 симв. | обрезка перед отправкой в LLM |
 | Размер пачки | 10 | статей за запуск cron |
-| Задержка между запросами | 250 мс | пауза между запросами перевода |
+| Задержка между запросами | 1000 мс | пауза между запросами перевода |
 | Логирование | выкл | подробные логи для отладки |
 
 ### Примечания

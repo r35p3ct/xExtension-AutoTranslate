@@ -142,7 +142,7 @@ foreach ($users as $user) {
     }
 
     $batchSize = (int)($extension->getSystemConfigurationValue('batch_size') ?? 10);
-    $requestDelayMs = (int)($extension->getSystemConfigurationValue('request_delay_ms') ?? 250);
+    $requestDelayMs = (int)($extension->getSystemConfigurationValue('request_delay_ms') ?? 1000);
     $channelsFilter = $extension->getSystemConfigurationValue('channels_filter') ?? [];
     $targetLang = (string)($extension->getSystemConfigurationValue('target_lang') ?? 'en');
     $engine = (string)($extension->getSystemConfigurationValue('engine') ?? 'google');

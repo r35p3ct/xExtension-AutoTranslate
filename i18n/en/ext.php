@@ -3,7 +3,7 @@
 return [
     'field' => [
         'engine' => 'Translation engine',
-        'engine_hint' => 'Google Translate — free public endpoint, no API key needed, fast, detected language is skipped automatically. LLM via OpenRouter — higher quality on complex HTML, preserves markup better, requires an API key and costs money per request.',
+        'engine_hint' => 'Google Translate — free public endpoint, no API key needed, fast, detected language is skipped automatically. Google + LLM fallback — Google first, and if it is rate-limited or fails, the entry is automatically translated via the LLM (needs an API key). LLM via OpenRouter — every entry is translated by the LLM, best markup quality, costs money per request.',
         'target_lang' => 'Translate into',
         'target_lang_hint' => 'Target language for all translations. Articles that are already in this language are skipped.',
         'labels' => 'Label names',
@@ -26,7 +26,7 @@ return [
         'batch_size' => 'Batch size',
         'batch_size_hint' => 'How many entries to translate per background script run (1–100).',
         'request_delay_ms' => 'Request delay',
-        'request_delay_ms_hint' => 'Pause in milliseconds between translation requests (0–60000). Helps to stay under rate limits of the free Google endpoint.',
+        'request_delay_ms_hint' => 'Pause in milliseconds between translation requests (0–60000). Default 1000 ms keeps the free Google endpoints comfortable; the batch waits between runs anyway.',
         'channels_filter' => 'Feeds to translate',
         'channels_filter_hint' => 'Select feeds whose articles should be translated. If nothing is selected — all feeds are translated.',
         'select_all_channels' => 'Select all feeds',

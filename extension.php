@@ -46,9 +46,12 @@ class AutoTranslateExtension extends Minz_Extension
             $labelTranslated = trim(Minz_Request::paramString('auto_translate_label_translated', true));
             $labelAdvertisement = trim(Minz_Request::paramString('auto_translate_label_advertisement', true));
 
+            $engineRaw = Minz_Request::paramString('auto_translate_engine');
+            $engine = in_array($engineRaw, ['llm', 'both'], true) ? $engineRaw : 'google';
+
             // plaintext=true on text fields: otherwise quotes get HTML-escaped on every save
             $newConfig = [
-                'engine'                => Minz_Request::paramString('auto_translate_engine') === 'llm' ? 'llm' : 'google',
+                'engine'                => $engine,
                 'target_lang'           => $targetLang !== '' ? $targetLang : 'en',
                 'label_pending'         => $labelPending !== '' ? $labelPending : FreshExtension_AutoTranslate_Labels::DEFAULT_PENDING,
                 'label_translated'      => $labelTranslated !== '' ? $labelTranslated : FreshExtension_AutoTranslate_Labels::DEFAULT_TRANSLATED,
@@ -57,7 +60,7 @@ class AutoTranslateExtension extends Minz_Extension
                 'wait_ads_minutes'      => max(0, min(120, (int)Minz_Request::param('auto_translate_wait_ads_minutes', 10))),
                 'channels_filter'       => $channelsFilter,
                 'batch_size'            => max(1, min(100, (int)Minz_Request::param('auto_translate_batch_size', 10))),
-                'request_delay_ms'      => max(0, min(60000, (int)Minz_Request::param('auto_translate_request_delay_ms', 250))),
+                'request_delay_ms'      => max(0, min(60000, (int)Minz_Request::param('auto_translate_request_delay_ms', 1000))),
                 'enable_logging'        => Minz_Request::paramString('auto_translate_enable_logging') === '1',
                 'llm_api_key'           => Minz_Request::paramString('auto_translate_llm_api_key'),
                 'llm_model'             => trim(Minz_Request::paramString('auto_translate_llm_model', true)) ?: 'openai/gpt-4o-mini',
@@ -66,7 +69,8 @@ class AutoTranslateExtension extends Minz_Extension
 
             $this->setSystemConfiguration($newConfig);
 
-            // Newly added feeds: queue their already-received articles too
+            // Newly added feeds: queue their already-received articles too.
+            // Removed feeds: drop their pending labels so nothing lingers in the queue.
             $oldChannels = $oldConfig['channels_filter'] ?? [];
             if (!is_array($oldChannels)) {
                 $oldChannels = [];
@@ -75,6 +79,41 @@ class AutoTranslateExtension extends Minz_Extension
             if (!empty($addedFeeds)) {
                 $this->queueExistingEntriesForFeeds($addedFeeds);
             }
+            $removedFeeds = array_values(array_diff($oldChannels, $newConfig['channels_filter']));
+            if (!empty($removedFeeds)) {
+                $this->dequeueFeeds($removedFeeds);
+            }
+        }
+    }
+
+    /**
+     * Drop the pending label from queued entries of feeds that were removed
+     * from the translation list, so nothing lingers in the queue.
+     *
+     * @param array<int, string> $feedIds
+     */
+    private function dequeueFeeds(array $feedIds): void
+    {
+        $labelPending = (string)$this->getSystemConfigurationValue('label_pending') ?: FreshExtension_AutoTranslate_Labels::DEFAULT_PENDING;
+
+        $tagDao = FreshRSS_Factory::createTagDao();
+        try {
+            $pendingTag = $tagDao->searchByName($labelPending);
+            if ($pendingTag === null) {
+                return;
+            }
+
+            $model = new FreshExtension_AutoTranslate_PendingEntries_Model();
+            $removed = $model->dequeueFeeds((int)$pendingTag->id(), $feedIds);
+            if ($removed > 0) {
+                Minz_Log::warning(sprintf(
+                    'AutoTranslate: Dequeued %d articles from %d removed feed(s)',
+                    $removed,
+                    count($feedIds)
+                ));
+            }
+        } catch (Exception $e) {
+            Minz_Log::warning('AutoTranslate: Failed to dequeue removed feeds: ' . $e->getMessage());
         }
     }
 
@@ -213,25 +252,16 @@ class AutoTranslateExtension extends Minz_Extension
     }
 
     /**
-     * Cheap same-language pre-check in the hook, without any API call:
-     * for Cyrillic-script target languages an article whose letters are
-     * mostly Cyrillic is considered already translated.
+     * Cheap same-language pre-check in the hook, without any API call.
      */
     private function isLikelyInTargetLanguage(FreshRSS_Entry $entry): bool
     {
         $target = strtolower(trim((string)$this->getSystemConfigurationValue('target_lang') ?: 'en'));
-        if (!in_array($target, FreshExtension_AutoTranslate_Labels::CYRILLIC_TARGETS, true)) {
-            return false;
-        }
-
-        $text = (string)$entry->title() . "\n" . strip_tags((string)$entry->content());
-        $letters = preg_match_all('/\p{L}/u', $text);
-        if ($letters < 40) {
-            return false;
-        }
-
-        $cyrillic = preg_match_all('/\p{Cyrillic}/u', $text);
-        return ($cyrillic / $letters) > 0.7;
+        return FreshExtension_AutoTranslate_Controller::isLikelyInTargetText(
+            (string)$entry->title(),
+            (string)$entry->content(),
+            $target
+        );
     }
 
     /**
