@@ -62,6 +62,12 @@ The engine is a dropdown in the settings; you can switch at any time.
 ### Notes
 
 - The original title/content are **replaced** by the translation (they are not kept anywhere). If you also want to keep the original, back up your database.
+- Translations survive feed updates: when the feed reports changed content for an already labelled article, the update is discarded instead of overwriting the translation.
+- If translations were wiped by feed updates before v0.1.1, requeue them with:
+  ```bash
+  docker exec freshrss php /var/www/FreshRSS/extensions/xExtension-AutoTranslate/scripts/requeue_reverted.php
+  ```
+  Saving the extension settings runs the same check automatically.
 - The free Google endpoint is unofficial (the same one used by many open-source tools). If it ever starts misbehaving, switch the engine to LLM in the settings — no code changes needed.
 - HTML markup is preserved: Google chunks the content at `</p>` boundaries, the LLM is instructed to keep all tags intact.
 - All user-facing strings are available in English and Russian; FreshRSS picks the language from your profile (add more in `i18n/`).
@@ -127,6 +133,12 @@ The engine is a dropdown in the settings; you can switch at any time.
 ### Примечания
 
 - Оригинальные заголовок и текст **заменяются** переводом (нигде не сохраняются). Если хотите хранить оригинал — сделайте резервную копию базы.
+- Перевод не затирается обновлениями фида: если фид сообщает об изменении уже помеченной статьи, обновление отбрасывается, перевод сохраняется.
+- Если переводы были затёрты обновлениями фида до версии 0.1.1, верните их в очередь:
+  ```bash
+  docker exec freshrss php /var/www/FreshRSS/extensions/xExtension-AutoTranslate/scripts/requeue_reverted.php
+  ```
+  Та же проверка автоматически выполняется при сохранении настроек расширения.
 - Бесплатный Google-эндпоинт неофициальный (им пользуются многие open-source инструменты). Если начнёт сбоить — переключите движок на LLM в настройках, без правки кода.
 - HTML-разметка сохраняется: Google-движок режет текст на чанки по границам `</p>`, LLM получает инструкцию сохранять все теги.
 - Все строки интерфейса доступны на английском и русском; FreshRSS берёт язык из профиля пользователя (добавить другие можно в `i18n/`).

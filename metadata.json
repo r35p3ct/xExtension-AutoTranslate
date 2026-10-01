@@ -2,7 +2,7 @@
     "name": "AutoTranslate",
     "author": "r35p3ct",
     "description": "Automatically translate articles from selected feeds. Uses the free Google Translate endpoint or an LLM (OpenRouter). Translations are written into the article title and content, so they show up in every client - web UI and mobile apps alike.",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "entrypoint": "AutoTranslate",
     "type": "user",
     "system_configuration": [

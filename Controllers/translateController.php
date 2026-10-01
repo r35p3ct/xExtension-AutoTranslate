@@ -194,6 +194,9 @@ class FreshExtension_AutoTranslate_Controller extends FreshRSS_ActionController
                 }
                 $result['skipped']++;
                 $result['details'][] = ['entry_id' => $entryId, 'status' => 'already_in_target'];
+                if ($this->enableLogging) {
+                    Minz_Log::warning('AutoTranslate: Entry already in target language, labels swapped entry_id=' . $entryId);
+                }
                 continue;
             }
 

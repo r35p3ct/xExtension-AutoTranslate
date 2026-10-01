@@ -95,6 +95,32 @@ class FreshExtension_AutoTranslate_PendingEntries_Model extends Minz_ModelPdo
     }
 
     /**
+     * Whether the entry for the given feed+guid (the hook entry_before_update
+     * works with entries that have no DB id yet) carries the pending or the
+     * translated label. Checks the entry's id via _entrytag (UI tagging) and
+     * the tags column (hook tagging).
+     */
+    public function hasTranslateLabel(int $feedId, string $guid, int $pendingTagId, int $translatedTagId): bool
+    {
+        $stm = $this->pdo->prepare('SELECT id FROM `_entry` WHERE id_feed = :id_feed AND guid = :guid LIMIT 1');
+        if ($stm === false) {
+            return false;
+        }
+        $stm->bindValue(':id_feed', $feedId, PDO::PARAM_INT);
+        $stm->bindValue(':guid', $guid, PDO::PARAM_STR);
+        if (!$stm->execute() || !is_array($row = $stm->fetch(PDO::FETCH_ASSOC))) {
+            return false;
+        }
+
+        $entryId = (string)($row['id'] ?? '');
+        if ($entryId === '') {
+            return false;
+        }
+
+        return $this->hasTag($pendingTagId, $entryId) || $this->hasTag($translatedTagId, $entryId);
+    }
+
+    /**
      * Unix timestamp of the entry publication date (0 if unknown).
      */
     public function getEntryDate(string $entryId): int
@@ -368,6 +394,77 @@ class FreshExtension_AutoTranslate_PendingEntries_Model extends Minz_ModelPdo
         }
 
         return $removed;
+    }
+
+    /**
+     * Requeue entries whose translation was wiped by a feed update.
+     *
+     * Fingerprint of a wiped entry: the translated label row still exists in
+     * `_entrytag` (updateEntry() does not touch that table), but the `tags`
+     * column of `_entry` lost the #t:<translated> marker (updateEntry()
+     * rewrites the tags column with feed-provided tags). Such entries get the
+     * translated label swapped for the pending one, so the next worker run
+     * translates them again.
+     *
+     * @param int $pendingTagId id of the pending tag
+     * @param int $translatedTagId id of the translated tag
+     * @param array<int, string|int> $feedIds feed ids (empty = none)
+     * @return int number of requeued entries
+     */
+    public function requeueRevertedEntries(int $pendingTagId, int $translatedTagId, array $feedIds): int
+    {
+        if (empty($feedIds) || $pendingTagId <= 0 || $translatedTagId <= 0) {
+            return 0;
+        }
+
+        $translatedPattern = '#t:' . $translatedTagId;
+        $requeued = 0;
+        $lastId = PHP_INT_MAX;
+
+        while (true) {
+            $placeholders = implode(',', array_fill(0, count($feedIds), '?'));
+            $sql = "SELECT e.id FROM `_entry` e
+                    JOIN `_entrytag` et ON et.id_entry = e.id AND et.id_tag = ?
+                    WHERE e.id_feed IN ($placeholders) AND e.id < ?
+                      AND NOT (e.tags = ? OR e.tags LIKE ? ESCAPE '\\' OR e.tags LIKE ? ESCAPE '\\' OR e.tags LIKE ? ESCAPE '\\')
+                    ORDER BY e.id DESC LIMIT 300";
+            $params = [$translatedTagId];
+            foreach ($feedIds as $feedId) {
+                $params[] = (int)$feedId;
+            }
+            $params[] = $lastId;
+            $params[] = $translatedPattern;
+            $params[] = $translatedPattern . ' %';
+            $params[] = '% ' . $translatedPattern . ' %';
+            $params[] = '% ' . $translatedPattern;
+
+            $stm = $this->pdo->prepare($sql);
+            if ($stm === false || !$stm->execute($params)) {
+                break;
+            }
+
+            $rows = $stm->fetchAll(PDO::FETCH_ASSOC);
+            if (empty($rows)) {
+                break;
+            }
+
+            foreach ($rows as $row) {
+                $entryId = (string)($row['id'] ?? '');
+                if ($entryId === '') {
+                    continue;
+                }
+                $lastId = (int)$entryId;
+                if ($this->removeTagFromEntry($translatedTagId, $entryId) && $this->addTagToEntry($pendingTagId, $entryId)) {
+                    $requeued++;
+                }
+            }
+
+            if (count($rows) < 300) {
+                break;
+            }
+        }
+
+        return $requeued;
     }
 
     /**

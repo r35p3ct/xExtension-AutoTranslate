@@ -12,7 +12,7 @@ require_once __DIR__ . '/Controllers/translateController.php';
  * entry_before_add hook) and replaces title/content with the translation
  * via a background worker, so translations are visible in every client.
  *
- * @version 0.1.0
+ * @version 0.1.1
  */
 class AutoTranslateExtension extends Minz_Extension
 {
@@ -21,6 +21,7 @@ class AutoTranslateExtension extends Minz_Extension
         $this->registerTranslates();
         $this->registerController('translate');
         $this->registerHook('entry_before_add', [$this, 'onEntryBeforeAdd']);
+        $this->registerHook('entry_before_update', [$this, 'onEntryBeforeUpdate']);
     }
 
     /**
@@ -83,6 +84,49 @@ class AutoTranslateExtension extends Minz_Extension
             if (!empty($removedFeeds)) {
                 $this->dequeueFeeds($removedFeeds);
             }
+
+            // Self-healing: entries whose translation was wiped by a feed
+            // update keep the translated label row but lost the tag marker —
+            // put them back into the queue.
+            $this->requeueWipedTranslations($newConfig['channels_filter']);
+        }
+    }
+
+    /**
+     * Swap the translated label back to the pending one for entries that were
+     * translated but whose text got overwritten by a feed update afterwards
+     * (fingerprint: translated row in _entrytag, no translated marker in the
+     * tags column of _entry).
+     *
+     * @param array<int, string> $feedIds
+     */
+    private function requeueWipedTranslations(array $feedIds): void
+    {
+        if (empty($feedIds)) {
+            return;
+        }
+
+        $labelPending = (string)$this->getSystemConfigurationValue('label_pending') ?: FreshExtension_AutoTranslate_Labels::DEFAULT_PENDING;
+        $labelTranslated = (string)$this->getSystemConfigurationValue('label_translated') ?: FreshExtension_AutoTranslate_Labels::DEFAULT_TRANSLATED;
+
+        $tagDao = FreshRSS_Factory::createTagDao();
+        try {
+            $pendingTag = $tagDao->searchByName($labelPending);
+            $translatedTag = $tagDao->searchByName($labelTranslated);
+            if ($pendingTag === null || $translatedTag === null) {
+                return;
+            }
+
+            $model = new FreshExtension_AutoTranslate_PendingEntries_Model();
+            $requeued = $model->requeueRevertedEntries((int)$pendingTag->id(), (int)$translatedTag->id(), $feedIds);
+            if ($requeued > 0) {
+                Minz_Log::warning(sprintf(
+                    'AutoTranslate: Requeued %d entries whose translation was wiped by feed updates',
+                    $requeued
+                ));
+            }
+        } catch (Exception $e) {
+            Minz_Log::warning('AutoTranslate: Failed to requeue wiped translations: ' . $e->getMessage());
         }
     }
 
@@ -201,6 +245,65 @@ class AutoTranslateExtension extends Minz_Extension
         }
 
         $this->applyPendingLabel($entry);
+        return $entry;
+    }
+
+    /**
+     * Hook entry_before_update: FreshRSS overwrites existing entries when the
+     * feed reports changed content (edit, new comments, dynamic fields). That
+     * update rewrote the translated title/content with the original text and
+     * reset the tags column, while the _entrytag row kept the translated
+     * label — the "labelled translated but text unchanged" bug. Discard the
+     * update for entries that carry a translate label in the database.
+     * Returning null makes FreshRSS skip the update entirely.
+     *
+     * @param FreshRSS_Entry|null $entry
+     * @return FreshRSS_Entry|null
+     */
+    public function onEntryBeforeUpdate($entry): ?FreshRSS_Entry
+    {
+        if (!$entry) {
+            return $entry;
+        }
+
+        if (!$this->isChannelEnabled($entry)) {
+            return $entry;
+        }
+
+        try {
+            $tagDao = FreshRSS_Factory::createTagDao();
+            $pendingTag = $tagDao->searchByName(
+                (string)$this->getSystemConfigurationValue('label_pending') ?: FreshExtension_AutoTranslate_Labels::DEFAULT_PENDING
+            );
+            $translatedTag = $tagDao->searchByName(
+                (string)$this->getSystemConfigurationValue('label_translated') ?: FreshExtension_AutoTranslate_Labels::DEFAULT_TRANSLATED
+            );
+            if ($pendingTag === null && $translatedTag === null) {
+                return $entry;
+            }
+
+            $model = new FreshExtension_AutoTranslate_PendingEntries_Model();
+            $labeled = $model->hasTranslateLabel(
+                (int)$entry->feedId(),
+                (string)$entry->guid(),
+                $pendingTag !== null ? (int)$pendingTag->id() : 0,
+                $translatedTag !== null ? (int)$translatedTag->id() : 0
+            );
+        } catch (Exception $e) {
+            Minz_Log::warning('AutoTranslate: Failed to check labels on update: ' . $e->getMessage());
+            return $entry;
+        }
+
+        if ($labeled) {
+            if ($this->getSystemConfigurationValue('enable_logging')) {
+                Minz_Log::warning(sprintf(
+                    'AutoTranslate: Feed update discarded for labelled entry (feed %s) — keeping the translation',
+                    $entry->feedId()
+                ));
+            }
+            return null;
+        }
+
         return $entry;
     }
 
